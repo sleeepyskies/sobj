@@ -164,6 +164,7 @@ private:
         NAMED_OBJECT,   // o
         LINE_ELEMENT,   // l
         SMOOTH_SHADING, // s
+        MATERIAL_LIB,   // mtllib
         COMMENT,        // #
         BLANK,          // empty line
         UNKNOWN,        // ????
@@ -552,6 +553,7 @@ OBJLoader::Identifier OBJLoader::identifier(const std::string_view str) const
     if (str.starts_with("o ")) return Identifier::NAMED_OBJECT;
     if (str.starts_with("l ")) return Identifier::LINE_ELEMENT;
     if (str.starts_with("s ")) return Identifier::SMOOTH_SHADING;
+    if (str.starts_with("mtllib ")) return Identifier::MATERIAL_LIB;
     if (str.starts_with("# ")) return Identifier::COMMENT;
     if (str.empty())
         return Identifier::BLANK; // we trim before this call so it will always be empty
@@ -578,6 +580,8 @@ std::string OBJLoader::toString(const Identifier id) const
         return "LINE_ELEMENT";
     case Identifier::SMOOTH_SHADING:
         return "SMOOTH_SHADING";
+    case Identifier::MATERIAL_LIB:
+        return "MATERIAL_LIB";
     case Identifier::COMMENT:
         return "COMMENT";
     case Identifier::BLANK:
@@ -642,8 +646,6 @@ std::vector<Face> OBJLoader::triangulate(const Face& face) const
         throw std::runtime_error("Currently only quads and tris are supported");
     }
 
-    std::vector<Face> faces{};
-
     Face f1{};
     Face f2{};
     // we turn p1 p2 p3 p4 into p1 p2 p3 + p1 p3 p4
@@ -662,7 +664,7 @@ std::vector<Face> OBJLoader::triangulate(const Face& face) const
         if (!face.uvIndices.empty()) f2.uvIndices.push_back(face.uvIndices[i]);
     }
 
-    return faces;
+    return {f1, f2};
 }
 
 void OBJLoader::shrink()
@@ -697,15 +699,14 @@ void OBJLoader::makeGroupAnonym()
 
 void OBJLoader::makeGroup(const std::string& name)
 {
-    m_currentMeshName = name;
+    std::string name_ = name;
+    detail::trim(name_);
+    m_currentMeshName = name_;
     if (m_meshes.contains(name)) { return; }
 
     // always make a new group
-    m_meshes[name]      = {};
-    m_meshes[name].name = name;
-    m_meshes[name].name = name;
-
-    m_currentMeshName = name;
+    m_meshes[name_]      = {};
+    m_meshes[name_].name = name_;
 }
 
 //--------------------------------------------------
@@ -728,7 +729,7 @@ void OBJLoader::warn(const std::string& msg)
 
 void OBJLoader::error(const std::string& msg)
 {
-    nfo(msg);
+    err(msg);
     m_error += msg + '\n';
 }
 void OBJLoader::info(const std::string& msg) const
