@@ -1,11 +1,17 @@
 // ReSharper disable CppNonInlineFunctionDefinitionInHeaderFile
 #pragma once
 
+#include <algorithm>
+#include <cassert>
+#include <filesystem>
 #include <format>
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <stb_image.hpp>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 // sobj can optionally use the logging library slog which can be found at
 // https://github.com/sleeepyskies/slog
@@ -37,21 +43,36 @@ constexpr std::string GROUP_NAME_PREFIX = "group";
 
 struct Vec3 {
     float x, y, z;
-    void pushOnto(std::vector<float>& vector) const
-    {
-        vector.push_back(x);
-        vector.push_back(y);
-        vector.push_back(z);
-    }
 };
 
 struct Vec2 {
     float x, y;
-    void pushOnto(std::vector<float>& vector) const
-    {
-        vector.push_back(x);
-        vector.push_back(y);
-    }
+};
+
+struct ImageData {
+    std::string name{};
+    std::vector<unsigned char> bytes{};
+    int width    = 0;
+    int height   = 0;
+    int channels = 0;
+};
+
+struct Material {
+    std::string name{};
+
+    // texture map data
+
+    std::unique_ptr<ImageData> ambientMap   = nullptr; // Ka
+    std::unique_ptr<ImageData> diffuseMap   = nullptr; // Kd
+    std::unique_ptr<ImageData> specularMap  = nullptr; // Ks
+    std::unique_ptr<ImageData> roughnessMap = nullptr; // Ns
+    std::unique_ptr<ImageData> alphaMap     = nullptr; // d
+
+    Vec3 ambient{ -1 };
+    Vec3 diffuse{ -1 };
+    Vec3 specular{ -1 };
+    float roughness = -1;
+    float alpha     = -1;
 };
 
 struct Face {
@@ -67,15 +88,16 @@ struct Face {
 };
 
 struct Mesh {
-    std::vector<Face> faces;
     std::string name{};
+    std::vector<Face> faces{};
+    std::shared_ptr<Material> material = nullptr;
 };
 
 struct OBJData {
-    std::vector<float> positions{};
-    std::vector<float> normals{};
-    std::vector<float> textureUVs{};
-    std::vector<float> colors{};
+    std::vector<Vec3> positions{};
+    std::vector<Vec3> normals{};
+    std::vector<Vec2> textureUVs{};
+    std::vector<Vec3> colors{};
     std::vector<Mesh> meshes{};
     std::string name{};
 };
@@ -133,8 +155,96 @@ template <typename K, typename V> std::vector<V> stealValues(std::unordered_map<
 
 } // namespace detail
 //--------------------------------------------------
-// MARK: OBJ Class Definition
+// MARK: Class Definition
 //--------------------------------------------------
+
+class sobjLogger
+{
+
+public:
+    bool existsError() const;
+    bool existsWarning() const;
+    void error(const std::string& msg);
+    void warn(const std::string& msg);
+    void info(const std::string& msg);
+    std::vector<std::string> getErrors();
+    std::vector<std::string> getWarnings();
+    std::vector<std::string> getInfos();
+    void clear();
+
+private:
+    std::vector<std::string> m_errors{};
+    std::vector<std::string> m_warnings{};
+    std::vector<std::string> m_infos{};
+};
+
+class MathParser
+{
+public:
+    MathParser()  = default;
+    ~MathParser() = default;
+
+    std::optional<Vec3> parseVec3(const std::string& str) const;
+    std::optional<Vec2> parseVec2(const std::string& str) const;
+    std::optional<float> parseFloat(const std::string& str) const;
+};
+
+class MTLLoader
+{
+public:
+    MTLLoader(const std::shared_ptr<sobjLogger>& logger) : m_logger(logger)
+    {
+    }
+    ~MTLLoader() = default;
+
+    bool loadMaterialFile(const std::string& filePath);
+    void reset();
+
+    std::unordered_map<std::string, std::shared_ptr<Material>> stealMaterials();
+
+private:
+    /// @brief Indicates what the type of the line in the mtl file is.
+    enum class Identifier {
+        NEW_MATERIAL,  // newmtl
+                       //
+        AMBIENT_MAP,   // map_Ka
+        DIFFUSE_MAP,   // map_Kd
+        SPECULAR_MAP,  // map_Ks
+        ROUGHNESS_MAP, // map_Ns
+        ALPHA_MAP,     // map_d
+                       //
+        AMBIENT,       // Ka
+        DIFFUSE,       // Kd
+        SPECULAR,      // Ks
+        ROUGHNESS,     // Ns
+        ALPHA,         // d
+                       //
+        COMMENT,       // #
+        BLANK,         // empty line
+        UNKNOWN,       // ????
+    };
+
+    MathParser m_mathParser{};
+
+    std::unordered_map<std::string, std::shared_ptr<Material>> m_materials{};
+    std::string m_currentMaterial{};
+
+    std::string m_filePath{};
+    std::string m_workingDirectory{};
+    size_t m_line = 0;
+
+    std::shared_ptr<sobjLogger> m_logger = nullptr;
+
+    bool parseNewMaterial(const std::string& str);
+    std::optional<ImageData> parseImage(const std::string& str) const;
+
+    bool setImageMap(std::unique_ptr<ImageData>& imageMap, const std::string& line,
+                     Identifier identifier);
+
+    Identifier identifier(std::string_view str) const;
+    std::string toString(Identifier identifier) const;
+};
+
 class OBJLoader
 {
 public:
@@ -148,10 +258,11 @@ public:
     OBJData steal();
     OBJData share() const;
 
-    bool warning() const;
-    bool error() const;
-    std::string getWarning();
-    std::string getError();
+    std::vector<std::string> getErrors() const;
+    std::vector<std::string> getWarnings() const;
+    std::vector<std::string> getInfos() const;
+    bool existsError() const;
+    bool existsWarning() const;
 
 private:
     /// @brief Indicates what the type of the line in the obj file is.
@@ -162,9 +273,9 @@ private:
         FACE,           // f
         GROUP,          // g
         NAMED_OBJECT,   // o
-        LINE_ELEMENT,   // l
         SMOOTH_SHADING, // s
         MATERIAL_LIB,   // mtllib
+        USE_MATERIAL,   // usemtl
         COMMENT,        // #
         BLANK,          // empty line
         UNKNOWN,        // ????
@@ -189,25 +300,30 @@ private:
 
     Config m_config{};
 
+    std::shared_ptr<sobjLogger> m_logger = std::make_shared<sobjLogger>();
+
     uint32_t m_line = 0;
     std::string m_currentMeshName{};
     bool m_smoothShadingEnabled = false;
 
-    std::vector<float> m_positions{};
-    std::vector<float> m_normals{};
-    std::vector<float> m_textureUVs{};
-    std::vector<float> m_colors{}; // TODO
+    std::vector<Vec3> m_positions{};
+    std::vector<Vec3> m_normals{};
+    std::vector<Vec2> m_textureUVs{};
+    std::vector<Vec3> m_colors{}; // TODO
     std::unordered_map<std::string, Mesh> m_meshes{};
+    std::unordered_map<std::string, std::shared_ptr<Material>> m_materials{};
 
-    std::string m_error;
-    std::string m_warning;
     std::string m_filePath{};
+    std::string m_workingDirectory{};
 
-    std::optional<Vec3> parseVec3(const std::string& str);
-    std::optional<Vec2> parseVec2(const std::string& str);
+    MathParser m_mathParser{};
+    MTLLoader m_mtlLoader{ m_logger };
+
     std::optional<Face> parseFace(const std::string& str);
     void parseSmoothShading(const std::string& str);
     void parseGroup(const std::string& str);
+    std::optional<std::string> parseMaterialFilePath(const std::string& str) const;
+    bool parseUseMaterial(const std::string& str);
 
     Identifier identifier(std::string_view str) const;
     std::string toString(Identifier id) const;
@@ -220,20 +336,216 @@ private:
     void makeGroupAnonym();
 
     void reset();
-
-    void info(const std::string& msg) const;
-    void warn(const std::string& msg);
-    void error(const std::string& msg);
 };
 
 #ifdef SOBJ_IMPLEMENTATION
+//--------------------------------------------------
+// MARK: MTLLoader Parsing methods
+//--------------------------------------------------
+bool MTLLoader::loadMaterialFile(const std::string& filePath)
+{
+    m_filePath = filePath;
+    detail::trim(m_filePath);
+
+    if (!m_filePath.ends_with(".mtl")) { return false; }
+
+    std::filesystem::path objPath = m_filePath;
+    m_workingDirectory            = objPath.parent_path().string() + "/";
+
+    std::ifstream file;
+    file.open(filePath);
+
+    if (!file.is_open()) { return false; }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        detail::trim(line);
+
+        const Identifier id = identifier(line);
+        switch (id) {
+        case Identifier::NEW_MATERIAL: {
+            if (!parseNewMaterial(line)) return false;
+            break;
+        }
+        case Identifier::AMBIENT_MAP: {
+            if (!setImageMap(m_materials[m_currentMaterial]->ambientMap, line, id)) {
+                return false;
+            }
+            break;
+        }
+        case Identifier::DIFFUSE_MAP: {
+            if (!setImageMap(m_materials[m_currentMaterial]->diffuseMap, line, id)) {
+                return false;
+            }
+            break;
+        }
+        case Identifier::SPECULAR_MAP: {
+            if (!setImageMap(m_materials[m_currentMaterial]->specularMap, line, id)) {
+                return false;
+            }
+            break;
+        }
+        case Identifier::ROUGHNESS_MAP: {
+            if (!setImageMap(m_materials[m_currentMaterial]->roughnessMap, line, id)) {
+                return false;
+            }
+            break;
+        }
+        case Identifier::ALPHA_MAP: {
+            if (!setImageMap(m_materials[m_currentMaterial]->ambientMap, line, id)) {
+                return false;
+            }
+            break;
+        }
+        case Identifier::AMBIENT: {
+            const auto result = m_mathParser.parseVec3(line);
+            if (!result) {
+                m_logger->error(std::format(
+                    "An error occurred when parsing {} at line {}", m_filePath, m_line));
+                return false;
+            }
+            m_materials[m_currentMaterial]->ambient = *result;
+            break;
+        }
+        case Identifier::DIFFUSE: {
+            const auto result = m_mathParser.parseVec3(line);
+            if (!result) {
+                m_logger->error(std::format(
+                    "An error occurred when parsing {} at line {}", m_filePath, m_line));
+                return false;
+            }
+            m_materials[m_currentMaterial]->diffuse = *result;
+            break;
+        }
+        case Identifier::SPECULAR: {
+            const auto result = m_mathParser.parseVec3(line);
+            if (!result) {
+                m_logger->error(std::format(
+                    "An error occurred when parsing {} at line {}", m_filePath, m_line));
+                return false;
+            }
+            m_materials[m_currentMaterial]->specular = *result;
+            break;
+        }
+        case Identifier::ROUGHNESS: {
+            const auto result = m_mathParser.parseFloat(line);
+            if (!result) {
+                m_logger->error(std::format(
+                    "An error occurred when parsing {} at line {}", m_filePath, m_line));
+                return false;
+            }
+            m_materials[m_currentMaterial]->roughness = *result;
+            break;
+        }
+        case Identifier::ALPHA: {
+            const auto result = m_mathParser.parseFloat(line);
+            if (!result) {
+                m_logger->error(std::format(
+                    "An error occurred when parsing {} at line {}", m_filePath, m_line));
+                return false;
+            }
+            m_materials[m_currentMaterial]->alpha = *result;
+            break;
+        }
+        case Identifier::COMMENT:
+        case Identifier::BLANK:
+            break;
+        case Identifier::UNKNOWN:
+            m_logger->warn(
+                std::format("Unknown identifier encountered in {} at line {}", m_filePath, m_line));
+            break;
+        }
+
+        m_line++;
+    }
+
+    return true;
+}
+
+bool MTLLoader::parseNewMaterial(const std::string& str)
+{
+    std::stringstream stream{ str };
+    std::string _;
+    std::string name;
+
+    stream >> _ >> name;
+
+    if (stream.fail()) { return false; }
+    assert(!m_materials.contains(name));
+
+    m_materials[name] = std::make_shared<Material>(name);
+    m_currentMaterial = name;
+
+    return true;
+}
+
+std::optional<ImageData> MTLLoader::parseImage(const std::string& str) const
+{
+    std::stringstream stream{ str };
+    std::string _;
+    std::string path;
+
+    stream >> _ >> path;
+
+    detail::trim(path);
+    const std::string name = detail::fileNameFromPath(path);
+
+    if (stream.fail()) { return std::nullopt; }
+
+    int x, y, channels;
+    const std::string relativePath = m_workingDirectory + path;
+    stbi_set_flip_vertically_on_load(true);
+    unsigned char* bytes = stbi_load(relativePath.c_str(), &x, &y, &channels, STBI_default);
+    // TODO: error check here
+    const size_t size = x * y * channels;
+
+    ImageData data;
+    data.name     = name;
+    data.bytes    = std::vector(bytes, bytes + size);
+    data.height   = x;
+    data.width    = y;
+    data.channels = channels;
+
+    stbi_image_free(bytes);
+
+    return data;
+}
+
+bool MTLLoader::setImageMap(std::unique_ptr<ImageData>& imageMap, const std::string& line,
+                            const Identifier identifier)
+{
+    const auto result = parseImage(line);
+    if (!result) return false;
+    if (m_materials.empty()) return false;
+    assert(m_materials.contains(m_currentMaterial));
+    if (imageMap) {
+        m_logger->warn(std::format("Defined two {} image maps in file {} at line {}",
+                                   toString(identifier),
+                                   m_filePath,
+                                   m_line));
+    }
+    imageMap = std::make_unique<ImageData>(*result);
+
+    return true;
+}
+
 //--------------------------------------------------
 // MARK: OBJLoader Parsing methods
 //--------------------------------------------------
 bool OBJLoader::load(const std::string& filePath)
 {
     reset();
+
+    detail::trim(m_filePath);
     m_filePath = filePath;
+
+    std::filesystem::path objPath = m_filePath;
+    m_workingDirectory            = objPath.parent_path().string() + "/";
+
+    if (!m_filePath.ends_with(".obj")) {
+        m_logger->error(std::format("The file {} does not have the .obj extension", m_filePath));
+        return false;
+    }
 
     // open file, TODO(Error handling here?)
     std::ifstream file;
@@ -247,21 +559,33 @@ bool OBJLoader::load(const std::string& filePath)
 
         switch (identifier(line)) {
         case Identifier::POSITION: {
-            const auto result = parseVec3(line);
-            if (!result) return false;
-            result->pushOnto(m_positions);
+            const auto result = m_mathParser.parseVec3(line);
+            if (!result) {
+                m_logger->error(std::format(
+                    "An error occurred when parsing {} at line {}", m_filePath, m_line));
+                return false;
+            }
+            m_positions.push_back(*result);
             break;
         }
         case Identifier::NORMAL: {
-            const auto result = parseVec3(line);
-            if (!result) return false;
-            result->pushOnto(m_normals);
+            const auto result = m_mathParser.parseVec3(line);
+            if (!result) {
+                m_logger->error(std::format(
+                    "An error occurred when parsing {} at line {}", m_filePath, m_line));
+                return false;
+            }
+            m_normals.push_back(*result);
             break;
         }
         case Identifier::UV: {
-            const auto result = parseVec2(line);
-            if (!result) return false;
-            result->pushOnto(m_textureUVs);
+            const auto result = m_mathParser.parseVec2(line);
+            if (!result) {
+                m_logger->error(std::format(
+                    "An error occurred when parsing {} at line {}", m_filePath, m_line));
+                return false;
+            }
+            m_textureUVs.push_back(*result);
             break;
         }
         case Identifier::FACE: {
@@ -283,13 +607,22 @@ bool OBJLoader::load(const std::string& filePath)
             parseGroup(line);
             break;
         }
-        case Identifier::LINE_ELEMENT:
-            throw std::runtime_error("This functionality is not yet supported.");
+        case Identifier::MATERIAL_LIB: {
+            const auto result = parseMaterialFilePath(line);
+            if (!result) return false;
+            m_mtlLoader.loadMaterialFile(m_workingDirectory + *result); // look in this dir
+            m_materials = m_mtlLoader.stealMaterials();
+            break;
+        }
+        case Identifier::USE_MATERIAL: {
+            parseUseMaterial(line);
+            break;
+        }
         case Identifier::BLANK:
         case Identifier::COMMENT:
             break;
         case Identifier::UNKNOWN:
-            warn(std::format(
+            m_logger->warn(std::format(
                 "Encountered unknown line identifier in file {} at line {}.", m_filePath, m_line));
             break;
         }
@@ -300,45 +633,51 @@ bool OBJLoader::load(const std::string& filePath)
     file.close();
 
     if (m_positions.empty()) {
-        error(std::format(".obj file {} must include at least 1 position", m_filePath));
+        m_logger->error(std::format(".obj file {} must include at least 1 position", m_filePath));
         return false;
     }
 
-    info(std::format("Successfully parsed and loaded data from {}", m_filePath));
+    m_logger->info(std::format("Successfully parsed and loaded data from {}", m_filePath));
 
     shrink();
 
     return true;
 }
 
-std::optional<Vec3> OBJLoader::parseVec3(const std::string& str)
+std::optional<Vec3> MathParser::parseVec3(const std::string& str) const
 {
     // TODO: handle too many args? what about comments inline
     std::stringstream stream{ str };
     float x, y, z;
     std::string _;
     stream >> _ >> x >> y >> z;
-    if (stream.fail()) {
-        error(std::format("An error occurred when parsing {} at line {}", m_filePath, m_line));
-        return std::nullopt;
-    }
+    if (stream.fail()) { return std::nullopt; }
 
     return { { x, y, z } };
 }
 
-std::optional<Vec2> OBJLoader::parseVec2(const std::string& str)
+std::optional<Vec2> MathParser::parseVec2(const std::string& str) const
 {
     // TODO: handle too many args? what about comments inline
     std::stringstream stream{ str };
     float x, y;
     std::string _;
     stream >> _ >> x >> y;
-    if (stream.fail()) {
-        error(std::format("An error occurred when parsing {} at line {}", m_filePath, m_line));
-        return std::nullopt;
-    }
+    if (stream.fail()) { return std::nullopt; }
 
     return { { x, y } };
+}
+
+std::optional<float> MathParser::parseFloat(const std::string& str) const
+{
+    // TODO: handle too many args? what about comments inline
+    std::stringstream stream{ str };
+    float x;
+    std::string _;
+    stream >> _ >> x;
+    if (stream.fail()) { return std::nullopt; }
+
+    return { x };
 }
 
 std::optional<Face> OBJLoader::parseFace(const std::string& str)
@@ -355,7 +694,7 @@ std::optional<Face> OBJLoader::parseFace(const std::string& str)
 
         while (stream >> v >> slash1 >> slash2 >> vn) {
             if (slash1 != detail::DELIMITER || slash2 != detail::DELIMITER) {
-                error(
+                m_logger->error(
                     std::format("Invalid syntax encountered in file {} at line {} ({} or "
                                 "{} is not \\)",
                                 m_filePath,
@@ -382,7 +721,7 @@ std::optional<Face> OBJLoader::parseFace(const std::string& str)
             stream >> slash2 >> vn;
             do {
                 if (slash1 != detail::DELIMITER || slash2 != detail::DELIMITER) {
-                    error(
+                    m_logger->error(
                         std::format("Invalid syntax encountered in file {} at line {} ({} "
                                     "or {} is not \\)",
                                     m_filePath,
@@ -401,7 +740,7 @@ std::optional<Face> OBJLoader::parseFace(const std::string& str)
         // v/vt syntax
         do {
             if (slash1 != detail::DELIMITER) {
-                error(
+                m_logger->error(
                     std::format("Invalid syntax encountered in file {} at line {} ({} is "
                                 "not \\)",
                                 m_filePath,
@@ -443,10 +782,10 @@ void OBJLoader::parseSmoothShading(const std::string& str)
             makeGroupAnonym();
             m_smoothShadingEnabled = false;
         } else {
-            warn(std::format("Could not parse file {} line {} due to unknown word {}",
-                             m_filePath,
-                             m_line,
-                             toggle));
+            m_logger->warn(std::format("Could not parse file {} line {} due to unknown word {}",
+                                       m_filePath,
+                                       m_line,
+                                       toggle));
         }
     }
 
@@ -474,8 +813,114 @@ void OBJLoader::parseGroup(const std::string& str)
     makeGroup(line);
 }
 
+std::optional<std::string> OBJLoader::parseMaterialFilePath(const std::string& str) const
+{
+    std::stringstream stream{ str };
+    std::string _;
+    std::string path{};
+    stream >> _;
+    std::getline(stream, path);
+    detail::trim(path);
+    return { path };
+}
+
+bool OBJLoader::parseUseMaterial(const std::string& str)
+{
+    if (m_meshes.empty()) { return false; }
+
+    std::stringstream stream{ str };
+    std::string _;
+    std::string name;
+    stream >> _;
+    std::getline(stream, name);
+    detail::trim(name);
+
+    if (stream.fail()) { return false; }
+
+    assert(m_meshes.contains(m_currentMeshName));
+    if (!m_materials.contains(name)) { return false; }
+
+    m_meshes[m_currentMeshName].material = m_materials[name];
+
+    return true;
+}
+
 //--------------------------------------------------
-// MARK: OBJLoader Non Parsing Methods
+// MARK: MTLLoader Helper Methods
+//--------------------------------------------------
+
+std::string MTLLoader::toString(const Identifier identifier) const
+{
+    switch (identifier) {
+    case Identifier::NEW_MATERIAL:
+        return "newmtl";
+    case Identifier::AMBIENT_MAP:
+        return "map_Ka";
+    case Identifier::DIFFUSE_MAP:
+        return "map_Kd";
+    case Identifier::SPECULAR_MAP:
+        return "map_Ks";
+    case Identifier::ROUGHNESS_MAP:
+        return "map_Ns";
+    case Identifier::ALPHA_MAP:
+        return "map_d";
+    case Identifier::AMBIENT:
+        return "Ka";
+    case Identifier::DIFFUSE:
+        return "Kd";
+    case Identifier::SPECULAR:
+        return "Ks";
+    case Identifier::ROUGHNESS:
+        return "Ns";
+    case Identifier::ALPHA:
+        return "d";
+    case Identifier::COMMENT:
+        return "#";
+    case Identifier::BLANK:
+        return "";
+    case Identifier::UNKNOWN:
+        return "unknown";
+    default:
+        return "invalid";
+    }
+}
+
+MTLLoader::Identifier MTLLoader::identifier(const std::string_view str) const
+{
+    if (str.starts_with("newmtl ")) return Identifier::NEW_MATERIAL;
+
+    if (str.starts_with("map_Ka ")) return Identifier::AMBIENT_MAP;
+    if (str.starts_with("map_Kd ")) return Identifier::DIFFUSE_MAP;
+    if (str.starts_with("map_Ks ")) return Identifier::SPECULAR_MAP;
+    if (str.starts_with("map_Ns ")) return Identifier::ROUGHNESS_MAP;
+    if (str.starts_with("map_d ")) return Identifier::ALPHA_MAP;
+
+    if (str.starts_with("Ka ")) return Identifier::AMBIENT;
+    if (str.starts_with("Kd ")) return Identifier::DIFFUSE;
+    if (str.starts_with("Ks ")) return Identifier::SPECULAR;
+    if (str.starts_with("Ns ")) return Identifier::ROUGHNESS;
+    if (str.starts_with("d ")) return Identifier::ALPHA;
+
+    if (str.starts_with("# ")) return Identifier::COMMENT;
+    if (str.empty()) return Identifier::BLANK;
+
+    return Identifier::UNKNOWN;
+}
+
+std::unordered_map<std::string, std::shared_ptr<Material>> MTLLoader::stealMaterials()
+{
+    return std::move(m_materials);
+}
+
+void MTLLoader::reset()
+{
+    m_materials.clear();
+    m_filePath.clear();
+    m_line = 0;
+}
+
+//--------------------------------------------------
+// MARK: OBJLoader Helper Methods
 //--------------------------------------------------
 
 OBJData OBJLoader::steal()
@@ -516,33 +961,9 @@ void OBJLoader::reset()
     m_textureUVs.clear();
     m_colors.clear();
     m_meshes.clear();
-    m_error.clear();
-    m_warning.clear();
+    m_logger->clear();
 }
 
-bool OBJLoader::warning() const
-{
-    return m_warning.size() == 0;
-}
-
-bool OBJLoader::error() const
-{
-    return m_error.size() == 0;
-}
-
-std::string OBJLoader::getWarning()
-{
-    return m_warning;
-}
-
-std::string OBJLoader::getError()
-{
-    return m_error;
-}
-
-//--------------------------------------------------
-// MARK: Helper Methods
-//--------------------------------------------------
 OBJLoader::Identifier OBJLoader::identifier(const std::string_view str) const
 {
     if (str.starts_with("v ")) return Identifier::POSITION;
@@ -551,9 +972,9 @@ OBJLoader::Identifier OBJLoader::identifier(const std::string_view str) const
     if (str.starts_with("f ")) return Identifier::FACE;
     if (str.starts_with("g ")) return Identifier::GROUP;
     if (str.starts_with("o ")) return Identifier::NAMED_OBJECT;
-    if (str.starts_with("l ")) return Identifier::LINE_ELEMENT;
     if (str.starts_with("s ")) return Identifier::SMOOTH_SHADING;
     if (str.starts_with("mtllib ")) return Identifier::MATERIAL_LIB;
+    if (str.starts_with("usemtl ")) return Identifier::USE_MATERIAL;
     if (str.starts_with("# ")) return Identifier::COMMENT;
     if (str.empty())
         return Identifier::BLANK; // we trim before this call so it will always be empty
@@ -565,27 +986,27 @@ std::string OBJLoader::toString(const Identifier id) const
 {
     switch (id) {
     case Identifier::POSITION:
-        return "VERTEX";
+        return "v";
     case Identifier::NORMAL:
-        return "NORMAL";
+        return "vn";
     case Identifier::UV:
-        return "UV";
+        return "vt";
     case Identifier::FACE:
-        return "FACE";
+        return "f";
     case Identifier::GROUP:
-        return "GROUP";
+        return "g";
     case Identifier::NAMED_OBJECT:
-        return "NAMED_OBJECT";
-    case Identifier::LINE_ELEMENT:
-        return "LINE_ELEMENT";
+        return "o";
     case Identifier::SMOOTH_SHADING:
-        return "SMOOTH_SHADING";
+        return "s";
     case Identifier::MATERIAL_LIB:
-        return "MATERIAL_LIB";
+        return "mtllib";
+    case Identifier::USE_MATERIAL:
+        return "usemtl";
     case Identifier::COMMENT:
-        return "COMMENT";
+        return "#";
     case Identifier::BLANK:
-        return "BLANK";
+        return "";
     case Identifier::UNKNOWN:
     default:
         return "UNKNOWN";
@@ -664,7 +1085,7 @@ std::vector<Face> OBJLoader::triangulate(const Face& face) const
         if (!face.uvIndices.empty()) f2.uvIndices.push_back(face.uvIndices[i]);
     }
 
-    return {f1, f2};
+    return { f1, f2 };
 }
 
 void OBJLoader::shrink()
@@ -721,20 +1142,79 @@ void OBJLoader::setShouldTriangulate(const bool b)
 // MARK: Logging
 //--------------------------------------------------
 
-void OBJLoader::warn(const std::string& msg)
+bool OBJLoader::existsError() const
 {
-    wrn(msg);
-    m_warning += msg + '\n';
+    return m_logger->existsError();
 }
 
-void OBJLoader::error(const std::string& msg)
+bool OBJLoader::existsWarning() const
+{
+    return m_logger->existsWarning();
+}
+
+std::vector<std::string> OBJLoader::getInfos() const
+{
+    return m_logger->getInfos();
+}
+
+std::vector<std::string> OBJLoader::getErrors() const
+{
+    return m_logger->getErrors();
+}
+
+std::vector<std::string> OBJLoader::getWarnings() const
+{
+    return m_logger->getWarnings();
+}
+
+bool sobjLogger::existsError() const
+{
+    return !m_errors.empty();
+}
+
+bool sobjLogger::existsWarning() const
+{
+    return !m_warnings.empty();
+}
+
+void sobjLogger::error(const std::string& msg)
 {
     err(msg);
-    m_error += msg + '\n';
+    m_errors.push_back(msg);
 }
-void OBJLoader::info(const std::string& msg) const
+
+void sobjLogger::warn(const std::string& msg)
+{
+    wrn(msg);
+    m_warnings.push_back(msg);
+}
+
+void sobjLogger::info(const std::string& msg)
 {
     nfo(msg);
+    m_infos.push_back(msg);
+}
+
+std::vector<std::string> sobjLogger::getErrors()
+{
+    return m_errors;
+}
+
+std::vector<std::string> sobjLogger::getWarnings()
+{
+    return m_warnings;
+}
+
+std::vector<std::string> sobjLogger::getInfos()
+{
+    return m_infos;
+}
+
+void sobjLogger::clear()
+{
+    m_errors.clear();
+    m_warnings.clear();
+    m_infos.clear();
 }
 
 #endif
