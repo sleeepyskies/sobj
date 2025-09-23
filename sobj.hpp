@@ -11,6 +11,7 @@
 #include <stb_image.hpp>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 // sobj can optionally use the logging library slog which can be found at
@@ -60,19 +61,17 @@ struct ImageData {
 struct Material {
     std::string name{};
 
-    // texture map data
+    std::optional<uint32_t> ambientMapIndex   = std::nullopt; // Ka
+    std::optional<uint32_t> diffuseMapIndex   = std::nullopt; // Kd
+    std::optional<uint32_t> specularMapIndex  = std::nullopt; // Ks
+    std::optional<uint32_t> roughnessMapIndex = std::nullopt; // Ns
+    std::optional<uint32_t> alphaMapIndex     = std::nullopt; // d
 
-    std::unique_ptr<ImageData> ambientMap   = nullptr; // Ka
-    std::unique_ptr<ImageData> diffuseMap   = nullptr; // Kd
-    std::unique_ptr<ImageData> specularMap  = nullptr; // Ks
-    std::unique_ptr<ImageData> roughnessMap = nullptr; // Ns
-    std::unique_ptr<ImageData> alphaMap     = nullptr; // d
-
-    Vec3 ambient{ -1 };
-    Vec3 diffuse{ -1 };
-    Vec3 specular{ -1 };
-    float roughness = -1;
-    float alpha     = -1;
+    std::optional<Vec3> ambient    = std::nullopt;
+    std::optional<Vec3> diffuse    = std::nullopt;
+    std::optional<Vec3> specular   = std::nullopt;
+    std::optional<float> roughness = std::nullopt;
+    std::optional<float> alpha     = std::nullopt;
 };
 
 struct Face {
@@ -90,16 +89,18 @@ struct Face {
 struct Mesh {
     std::string name{};
     std::vector<Face> faces{};
-    std::shared_ptr<Material> material = nullptr;
+    std::optional<uint32_t> materialIndex = std::nullopt;
 };
 
 struct OBJData {
+    std::string name{};
     std::vector<Vec3> positions{};
     std::vector<Vec3> normals{};
     std::vector<Vec2> textureUVs{};
     std::vector<Vec3> colors{};
     std::vector<Mesh> meshes{};
-    std::string name{};
+    std::vector<Material> materials{};
+    std::vector<ImageData> images{};
 };
 
 //--------------------------------------------------
@@ -200,7 +201,9 @@ public:
     bool loadMaterialFile(const std::string& filePath);
     void reset();
 
-    std::unordered_map<std::string, std::shared_ptr<Material>> stealMaterials();
+    std::vector<Material> stealMaterials();
+    std::vector<ImageData> stealImages();
+    std::unordered_map<std::string, uint32_t> materialNameToIndex();
 
 private:
     /// @brief Indicates what the type of the line in the mtl file is.
@@ -226,8 +229,10 @@ private:
 
     MathParser m_mathParser{};
 
-    std::unordered_map<std::string, std::shared_ptr<Material>> m_materials{};
-    std::string m_currentMaterial{};
+    std::vector<Material> m_materials{};
+    std::vector<ImageData> m_images{};
+    std::unordered_map<std::string, uint32_t> m_loadedImageToIndex{};
+    std::unordered_map<std::string, uint32_t> m_materialNameToIndex{};
 
     std::string m_filePath{};
     std::string m_workingDirectory{};
@@ -236,13 +241,14 @@ private:
     std::shared_ptr<sobjLogger> m_logger = nullptr;
 
     bool parseNewMaterial(const std::string& str);
-    std::optional<ImageData> parseImage(const std::string& str) const;
+    std::optional<uint32_t> parseImage(const std::string& str);
 
-    bool setImageMap(std::unique_ptr<ImageData>& imageMap, const std::string& line,
+    bool setImageMap(std::optional<uint32_t>& imageMapIndex, const std::string& line,
                      Identifier identifier);
 
     Identifier identifier(std::string_view str) const;
     std::string toString(Identifier identifier) const;
+    bool materialExists() const;
 };
 
 class OBJLoader
@@ -310,8 +316,11 @@ private:
     std::vector<Vec3> m_normals{};
     std::vector<Vec2> m_textureUVs{};
     std::vector<Vec3> m_colors{}; // TODO
-    std::unordered_map<std::string, Mesh> m_meshes{};
-    std::unordered_map<std::string, std::shared_ptr<Material>> m_materials{};
+    // FIXME: maybe dont store here and in mtlloader
+    std::vector<Mesh> m_meshes{};
+    std::vector<Material> m_materials{};
+    std::vector<ImageData> m_images{};
+    std::unordered_map<std::string, uint32_t> m_materialNameToIndex{};
 
     std::string m_filePath{};
     std::string m_workingDirectory{};
@@ -368,83 +377,83 @@ bool MTLLoader::loadMaterialFile(const std::string& filePath)
             break;
         }
         case Identifier::AMBIENT_MAP: {
-            if (!setImageMap(m_materials[m_currentMaterial]->ambientMap, line, id)) {
-                return false;
-            }
+            if (!materialExists()) return false;
+            if (!setImageMap(m_materials.back().alphaMapIndex, line, id)) { return false; }
             break;
         }
         case Identifier::DIFFUSE_MAP: {
-            if (!setImageMap(m_materials[m_currentMaterial]->diffuseMap, line, id)) {
-                return false;
-            }
+            if (!materialExists()) return false;
+            if (!setImageMap(m_materials.back().diffuseMapIndex, line, id)) { return false; }
             break;
         }
         case Identifier::SPECULAR_MAP: {
-            if (!setImageMap(m_materials[m_currentMaterial]->specularMap, line, id)) {
-                return false;
-            }
+            if (!materialExists()) return false;
+            if (!setImageMap(m_materials.back().specularMapIndex, line, id)) { return false; }
             break;
         }
         case Identifier::ROUGHNESS_MAP: {
-            if (!setImageMap(m_materials[m_currentMaterial]->roughnessMap, line, id)) {
-                return false;
-            }
+            if (!materialExists()) return false;
+            if (!setImageMap(m_materials.back().roughnessMapIndex, line, id)) { return false; }
             break;
         }
         case Identifier::ALPHA_MAP: {
-            if (!setImageMap(m_materials[m_currentMaterial]->ambientMap, line, id)) {
-                return false;
-            }
+            if (!materialExists()) return false;
+            if (!setImageMap(m_materials.back().ambientMapIndex, line, id)) { return false; }
             break;
         }
         case Identifier::AMBIENT: {
+            if (!materialExists()) return false;
             const auto result = m_mathParser.parseVec3(line);
             if (!result) {
                 m_logger->error(std::format(
                     "An error occurred when parsing {} at line {}", m_filePath, m_line));
                 return false;
             }
-            m_materials[m_currentMaterial]->ambient = *result;
+            m_materials.back().ambient = result;
             break;
         }
         case Identifier::DIFFUSE: {
+            if (!materialExists()) return false;
             const auto result = m_mathParser.parseVec3(line);
             if (!result) {
                 m_logger->error(std::format(
                     "An error occurred when parsing {} at line {}", m_filePath, m_line));
                 return false;
             }
-            m_materials[m_currentMaterial]->diffuse = *result;
+            m_materials.back().diffuse = result;
             break;
         }
         case Identifier::SPECULAR: {
+            if (!materialExists()) return false;
             const auto result = m_mathParser.parseVec3(line);
             if (!result) {
                 m_logger->error(std::format(
                     "An error occurred when parsing {} at line {}", m_filePath, m_line));
                 return false;
             }
-            m_materials[m_currentMaterial]->specular = *result;
+            m_materials.back().specular = result;
             break;
         }
         case Identifier::ROUGHNESS: {
+            if (!materialExists()) return false;
             const auto result = m_mathParser.parseFloat(line);
             if (!result) {
                 m_logger->error(std::format(
                     "An error occurred when parsing {} at line {}", m_filePath, m_line));
                 return false;
             }
-            m_materials[m_currentMaterial]->roughness = *result;
+            m_materials.back().roughness = result;
             break;
         }
         case Identifier::ALPHA: {
+            if (!materialExists()) return false;
             const auto result = m_mathParser.parseFloat(line);
             if (!result) {
                 m_logger->error(std::format(
                     "An error occurred when parsing {} at line {}", m_filePath, m_line));
                 return false;
             }
-            m_materials[m_currentMaterial]->alpha = *result;
+            m_materials.back().alpha = result;
             break;
         }
         case Identifier::COMMENT:
@@ -471,15 +480,15 @@ bool MTLLoader::parseNewMaterial(const std::string& str)
     stream >> _ >> name;
 
     if (stream.fail()) { return false; }
-    assert(!m_materials.contains(name));
+    if (m_materialNameToIndex.contains(name)) { return false; }
 
-    m_materials[name] = std::make_shared<Material>(name);
-    m_currentMaterial = name;
+    m_materials.emplace_back(name);
+    m_materialNameToIndex[name] = m_materials.size() - 1;
 
     return true;
 }
 
-std::optional<ImageData> MTLLoader::parseImage(const std::string& str) const
+std::optional<uint32_t> MTLLoader::parseImage(const std::string& str)
 {
     std::stringstream stream{ str };
     std::string _;
@@ -489,6 +498,8 @@ std::optional<ImageData> MTLLoader::parseImage(const std::string& str) const
 
     detail::trim(path);
     const std::string name = detail::fileNameFromPath(path);
+
+    if (m_loadedImageToIndex.contains(name)) { return m_loadedImageToIndex[name]; }
 
     if (stream.fail()) { return std::nullopt; }
 
@@ -508,23 +519,25 @@ std::optional<ImageData> MTLLoader::parseImage(const std::string& str) const
 
     stbi_image_free(bytes);
 
-    return data;
+    m_images.push_back(data);
+    m_loadedImageToIndex[name] = m_images.size() - 1;
+
+    return m_loadedImageToIndex[name];
 }
 
-bool MTLLoader::setImageMap(std::unique_ptr<ImageData>& imageMap, const std::string& line,
+bool MTLLoader::setImageMap(std::optional<uint32_t>& imageMapIndex, const std::string& line,
                             const Identifier identifier)
 {
     const auto result = parseImage(line);
     if (!result) return false;
     if (m_materials.empty()) return false;
-    assert(m_materials.contains(m_currentMaterial));
-    if (imageMap) {
+    if (imageMapIndex) {
         m_logger->warn(std::format("Defined two {} image maps in file {} at line {}",
                                    toString(identifier),
                                    m_filePath,
                                    m_line));
     }
-    imageMap = std::make_unique<ImageData>(*result);
+    imageMapIndex = result;
 
     return true;
 }
@@ -611,7 +624,9 @@ bool OBJLoader::load(const std::string& filePath)
             const auto result = parseMaterialFilePath(line);
             if (!result) return false;
             m_mtlLoader.loadMaterialFile(m_workingDirectory + *result); // look in this dir
-            m_materials = m_mtlLoader.stealMaterials();
+            m_materials           = m_mtlLoader.stealMaterials();
+            m_images              = m_mtlLoader.stealImages();
+            m_materialNameToIndex = m_mtlLoader.materialNameToIndex();
             break;
         }
         case Identifier::USE_MATERIAL: {
@@ -837,10 +852,9 @@ bool OBJLoader::parseUseMaterial(const std::string& str)
 
     if (stream.fail()) { return false; }
 
-    assert(m_meshes.contains(m_currentMeshName));
-    if (!m_materials.contains(name)) { return false; }
+    if (!m_materialNameToIndex.contains(name)) { return false; }
 
-    m_meshes[m_currentMeshName].material = m_materials[name];
+    m_meshes.back().materialIndex = m_materialNameToIndex[name];
 
     return true;
 }
@@ -907,9 +921,19 @@ MTLLoader::Identifier MTLLoader::identifier(const std::string_view str) const
     return Identifier::UNKNOWN;
 }
 
-std::unordered_map<std::string, std::shared_ptr<Material>> MTLLoader::stealMaterials()
+std::vector<Material> MTLLoader::stealMaterials()
 {
     return std::move(m_materials);
+}
+
+std::vector<ImageData> MTLLoader::stealImages()
+{
+    return std::move(m_images);
+}
+
+std::unordered_map<std::string, uint32_t> MTLLoader::materialNameToIndex()
+{
+    return m_materialNameToIndex;
 }
 
 void MTLLoader::reset()
@@ -919,6 +943,19 @@ void MTLLoader::reset()
     m_line = 0;
 }
 
+bool MTLLoader::materialExists() const
+{
+    if (m_materials.empty()) {
+        m_logger->error(
+            std::format("Attempting to load images before declaring a material in {} at line {}",
+                        m_filePath,
+                        m_line));
+        return false;
+    }
+
+    return true;
+}
+
 //--------------------------------------------------
 // MARK: OBJLoader Helper Methods
 //--------------------------------------------------
@@ -926,12 +963,14 @@ void MTLLoader::reset()
 OBJData OBJLoader::steal()
 {
     OBJData data;
+    data.name       = detail::fileNameFromPath(m_filePath);
     data.positions  = std::move(m_positions);
     data.normals    = std::move(m_normals);
     data.textureUVs = std::move(m_textureUVs);
     data.colors     = std::move(m_colors);
-    data.meshes     = detail::stealValues(m_meshes);
-    data.name       = detail::fileNameFromPath(m_filePath);
+    data.meshes     = std::move(m_meshes);
+    data.materials  = std::move(m_materials);
+    data.images     = std::move(m_images);
 
     reset();
 
@@ -941,12 +980,14 @@ OBJData OBJLoader::steal()
 OBJData OBJLoader::share() const
 {
     OBJData data;
+    data.name       = detail::fileNameFromPath(m_filePath);
     data.positions  = m_positions;
     data.normals    = m_normals;
     data.textureUVs = m_textureUVs;
     data.colors     = m_colors;
-    data.meshes     = detail::values(m_meshes);
-    data.name       = detail::fileNameFromPath(m_filePath);
+    data.meshes     = m_meshes;
+    data.materials  = m_materials;
+    data.images     = m_images;
 
     return data;
 }
@@ -1044,15 +1085,15 @@ size_t OBJLoader::calculateIndex(const int index, const IndexType type) const
 
 void OBJLoader::pushFace(const Face& face)
 {
-    assert(m_meshes.contains(m_currentMeshName));
-    m_meshes[m_currentMeshName].faces.push_back(face);
+    assert(!m_meshes.empty());
+    m_meshes.back().faces.push_back(face);
 }
 
 void OBJLoader::pushFaces(const std::vector<Face>& faces)
 {
-    assert(m_meshes.contains(m_currentMeshName));
+    assert(!m_meshes.empty());
     for (const auto& face : faces) {
-        m_meshes[m_currentMeshName].faces.push_back(face);
+        m_meshes.back().faces.push_back(face);
     }
 }
 
@@ -1094,7 +1135,10 @@ void OBJLoader::shrink()
     m_normals.shrink_to_fit();
     m_textureUVs.shrink_to_fit();
     m_colors.shrink_to_fit();
-    for (auto& [_, mesh] : m_meshes) {
+    m_images.shrink_to_fit();
+    m_materials.shrink_to_fit();
+    m_meshes.shrink_to_fit();
+    for (auto& mesh : m_meshes) {
         mesh.faces.shrink_to_fit();
     }
 }
@@ -1102,20 +1146,15 @@ void OBJLoader::shrink()
 void OBJLoader::makeGroupAnonym()
 {
     static size_t groupID = 0;
-    assert(m_meshes.contains(m_currentMeshName));
+    assert(!m_meshes.empty());
     // only create new group if current group is not empty
-    if (m_meshes[m_currentMeshName].faces.empty()) return;
+    if (m_meshes.back().faces.empty()) return;
 
     std::string name{};
-    do {
-        name = detail::GROUP_NAME_PREFIX + std::to_string(groupID);
-    } while (m_meshes.contains(name));
+    name = detail::GROUP_NAME_PREFIX + std::to_string(groupID++);
 
-    m_meshes[name]      = {};
-    m_meshes[name].name = name;
-    m_meshes[name].name = name;
-
-    m_currentMeshName = name;
+    m_meshes.push_back({});
+    m_meshes.back().name = name;
 }
 
 void OBJLoader::makeGroup(const std::string& name)
@@ -1123,11 +1162,10 @@ void OBJLoader::makeGroup(const std::string& name)
     std::string name_ = name;
     detail::trim(name_);
     m_currentMeshName = name_;
-    if (m_meshes.contains(name)) { return; }
 
     // always make a new group
-    m_meshes[name_]      = {};
-    m_meshes[name_].name = name_;
+    m_meshes.push_back({});
+    m_meshes.back().name = name_;
 }
 
 //--------------------------------------------------
